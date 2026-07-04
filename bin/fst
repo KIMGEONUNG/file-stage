@@ -13,9 +13,9 @@ Usage:
   fst mv [--flatten] [--stdin|--stdin0] FILE...
   fst ln [--flatten] [--stdin|--stdin0] FILE...
 
-  fst do cp ARGS...
-  fst do mv ARGS...
-  fst do ln ARGS...
+  fst do cp
+  fst do mv
+  fst do ln
 
   fst run
   fst show
@@ -226,6 +226,15 @@ read_records() {
   done < "$file"
 }
 
+append_record_to_file() {
+  local file=$1
+  local op=$2
+  local src=$3
+  local dst=$4
+
+  printf '%s\0%s\0%s\0' "$op" "$src" "$dst" >> "$file"
+}
+
 show_command() {
   if [[ ! -s ${stage_file:-} ]]; then
     printf 'No staged file operations.\n'
@@ -236,17 +245,48 @@ show_command() {
 }
 
 snapshot_stage_for_run() {
+  local selected_op=${1:-}
+  local keep_file
+  local matched=0
+  local op src dst
+
   [[ -s ${stage_file:-} ]] || die "no staged file operations"
 
   run_file=$(mktemp --tmpdir="$state_dir" run.XXXXXX.v1)
-  rm -f -- "$run_file"
-  mv -- "$stage_file" "$run_file"
-  : > "$stage_file"
+  : > "$run_file"
+
+  if [[ -z $selected_op ]]; then
+    mv -- "$stage_file" "$run_file"
+    : > "$stage_file"
+    return 0
+  fi
+
+  keep_file=$(mktemp --tmpdir="$state_dir" keep.XXXXXX.v1)
+  : > "$keep_file"
+
+  while IFS= read -r -d '' op \
+    && IFS= read -r -d '' src \
+    && IFS= read -r -d '' dst; do
+    if [[ $op == "$selected_op" ]]; then
+      append_record_to_file "$run_file" "$op" "$src" "$dst"
+      matched=1
+    else
+      append_record_to_file "$keep_file" "$op" "$src" "$dst"
+    fi
+  done < "$stage_file"
+
+  mv -- "$keep_file" "$stage_file"
+
+  if [[ $matched == 0 ]]; then
+    rm -f -- "$run_file"
+    die "no staged '$selected_op' operations"
+  fi
 }
 
 run_command() {
+  local selected_op=${1:-}
   local run_file=
-  with_lock snapshot_stage_for_run
+  with_lock snapshot_stage_for_run "$selected_op"
 
   if read_records run_one "$run_file"; then
     rm -f -- "$run_file"
@@ -267,9 +307,10 @@ do_command() {
   shift || true
 
   case $op in
-    cp) cp -rnv -- "$@" ;;
-    mv) mv -v -- "$@" ;;
-    ln) ln -sv -- "$@" ;;
+    cp|mv|ln)
+      (($# == 0)) || die "do $op does not accept arguments"
+      run_command "$op"
+      ;;
     *) die "unknown do operation: $op" ;;
   esac
 }
