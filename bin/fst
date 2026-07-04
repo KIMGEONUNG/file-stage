@@ -1,0 +1,313 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+program=${0##*/}
+state_dir=${FILE_STAGE_DIR:-${XDG_STATE_HOME:-"$HOME/.local/state"}/file-stage}
+stage_file=$state_dir/stage.v1
+lock_file=$state_dir/lock
+
+usage() {
+  cat <<'EOF'
+Usage:
+  fst cp [--flatten] [--stdin|--stdin0] FILE...
+  fst mv [--flatten] [--stdin|--stdin0] FILE...
+  fst ln [--flatten] [--stdin|--stdin0] FILE...
+
+  fst do cp ARGS...
+  fst do mv ARGS...
+  fst do ln ARGS...
+
+  fst run
+  fst show
+  fst clear
+
+Environment:
+  FILE_STAGE_DIR  Override the state directory.
+EOF
+}
+
+die() {
+  printf '%s: %s\n' "$program" "$*" >&2
+  exit 1
+}
+
+ensure_state_dir() {
+  mkdir -p -- "$state_dir"
+}
+
+ensure_stage_file() {
+  ensure_state_dir
+  : > "$stage_file"
+}
+
+with_lock() {
+  ensure_state_dir
+  local lock_fd
+  local restore_errexit=0
+  local status
+
+  exec {lock_fd}> "$lock_file"
+  flock "$lock_fd"
+
+  case $- in
+    *e*)
+      restore_errexit=1
+      set +e
+      ;;
+  esac
+
+  "$@"
+  status=$?
+  flock -u "$lock_fd"
+  eval "exec ${lock_fd}>&-"
+
+  if [[ $restore_errexit == 1 ]]; then
+    set -e
+  fi
+
+  return "$status"
+}
+
+shell_quote() {
+  printf '%q' "$1"
+}
+
+append_record() {
+  local op=$1
+  local src=$2
+  local dst=$3
+
+  ensure_state_dir
+  printf '%s\0%s\0%s\0' "$op" "$src" "$dst" >> "$stage_file"
+}
+
+stage_one() {
+  local op=$1
+  local flatten=$2
+  local source=$3
+  local src_abs dst
+
+  case $source in
+    /*) src_abs=$source ;;
+    *) src_abs=$PWD/$source ;;
+  esac
+
+  if [[ $flatten == 1 ]]; then
+    dst=$source
+    dst=${dst#./}
+    dst=${dst#/}
+    dst=${dst//\//-}
+  else
+    dst=
+  fi
+
+  append_record "$op" "$src_abs" "$dst"
+}
+
+stage_command() {
+  local op=$1
+  shift
+
+  local flatten=0
+  local stdin_mode=
+  local sources=()
+
+  while (($#)); do
+    case $1 in
+      -f|--flatten)
+        flatten=1
+        shift
+        ;;
+      --stdin)
+        stdin_mode=line
+        shift
+        ;;
+      --stdin0)
+        stdin_mode=nul
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        sources+=("$@")
+        break
+        ;;
+      -*)
+        die "unknown option for '$op': $1"
+        ;;
+      *)
+        sources+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -n $stdin_mode ]]; then
+    local item
+    if [[ $stdin_mode == nul ]]; then
+      while IFS= read -r -d '' item; do
+        sources+=("$item")
+      done
+    else
+      while IFS= read -r item; do
+        sources+=("$item")
+      done
+    fi
+  fi
+
+  ((${#sources[@]})) || die "no input files"
+
+  ensure_state_dir
+  for source in "${sources[@]}"; do
+    stage_one "$op" "$flatten" "$source"
+  done
+
+  show_command
+}
+
+run_one() {
+  local op=$1
+  local src=$2
+  local dst=$3
+  local target=.
+
+  if [[ -n $dst ]]; then
+    target=./$dst
+  fi
+
+  case $op in
+    cp) cp -rnv -- "$src" "$target" ;;
+    mv) mv -v -- "$src" "$target" ;;
+    ln) ln -sv -- "$src" "$target" ;;
+    *) die "bad stage record operation: $op" ;;
+  esac
+}
+
+print_one() {
+  local op=$1
+  local src=$2
+  local dst=$3
+  local target=.
+
+  if [[ -n $dst ]]; then
+    target=./$dst
+  fi
+
+  case $op in
+    cp)
+      printf 'cp -rnv -- %s %s\n' "$(shell_quote "$src")" "$(shell_quote "$target")"
+      ;;
+    mv)
+      printf 'mv -v -- %s %s\n' "$(shell_quote "$src")" "$(shell_quote "$target")"
+      ;;
+    ln)
+      printf 'ln -sv -- %s %s\n' "$(shell_quote "$src")" "$(shell_quote "$target")"
+      ;;
+    *)
+      printf '# bad stage record operation: %s\n' "$(shell_quote "$op")"
+      ;;
+  esac
+}
+
+read_records() {
+  local callback=$1
+  local file=${2:-$stage_file}
+  local op src dst
+
+  [[ -s $file ]] || return 0
+
+  while IFS= read -r -d '' op \
+    && IFS= read -r -d '' src \
+    && IFS= read -r -d '' dst; do
+    "$callback" "$op" "$src" "$dst" || return "$?"
+  done < "$file"
+}
+
+show_command() {
+  if [[ ! -s ${stage_file:-} ]]; then
+    printf 'No staged file operations.\n'
+    return 0
+  fi
+
+  read_records print_one
+}
+
+snapshot_stage_for_run() {
+  [[ -s ${stage_file:-} ]] || die "no staged file operations"
+
+  run_file=$(mktemp --tmpdir="$state_dir" run.XXXXXX.v1)
+  rm -f -- "$run_file"
+  mv -- "$stage_file" "$run_file"
+  : > "$stage_file"
+}
+
+run_command() {
+  local run_file=
+  with_lock snapshot_stage_for_run
+
+  if read_records run_one "$run_file"; then
+    rm -f -- "$run_file"
+  else
+    printf 'Run failed; snapshot preserved at %s\n' "$run_file" >&2
+    return 1
+  fi
+}
+
+clear_command() {
+  ensure_stage_file
+  printf 'Cleared staged file operations.\n'
+}
+
+do_command() {
+  local op=${1:-}
+  [[ -n $op ]] || die "missing operation after 'do'"
+  shift || true
+
+  case $op in
+    cp) cp -rnv -- "$@" ;;
+    mv) mv -v -- "$@" ;;
+    ln) ln -sv -- "$@" ;;
+    *) die "unknown do operation: $op" ;;
+  esac
+}
+
+main() {
+  local cmd=${1:-}
+
+  case $cmd in
+    cp|mv|ln)
+      shift
+      with_lock stage_command "$cmd" "$@"
+      ;;
+    do)
+      shift
+      do_command "$@"
+      ;;
+    run)
+      shift
+      (($# == 0)) || die "run does not accept arguments"
+      run_command
+      ;;
+    show)
+      shift
+      (($# == 0)) || die "show does not accept arguments"
+      with_lock show_command
+      ;;
+    clear)
+      shift
+      (($# == 0)) || die "clear does not accept arguments"
+      with_lock clear_command
+      ;;
+    -h|--help|help|'')
+      usage
+      ;;
+    *)
+      die "unknown command: $cmd"
+      ;;
+  esac
+}
+
+main "$@"

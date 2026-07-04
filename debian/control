@@ -1,0 +1,14 @@
+Source: file-stage
+Section: utils
+Priority: optional
+Maintainer: comar <comar@example.com>
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Build-Depends: debhelper-compat (= 13)
+
+Package: file-stage
+Architecture: all
+Depends: bash, coreutils, util-linux, ${misc:Depends}
+Description: stage file copy, move, and symlink operations
+ file-stage provides fst, a small shell command for staging cp, mv, and ln
+ operations in one directory and applying them later in another directory.
