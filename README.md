@@ -1,7 +1,24 @@
 # file-stage
 
-`file-stage` provides `fst`, a small command for staging file operations in one
-directory and applying them later in another directory.
+`file-stage` is a tiny command-line workflow upgrade for people who live in the
+shell and constantly move between directories. It lets you choose files in the
+place where they are easy to find, then apply the copy, move, or symlink
+operation later from the directory where you want the result.
+
+Instead of typing long absolute paths, juggling `cp source target`, or building
+one-off `find | xargs` commands for everyday file organization, you can stage
+the intent first:
+
+```sh
+fst cp report.pdf notes.md
+cd ~/archive/project
+fst do cp
+```
+
+The same workflow works for `mv` and `ln`, supports path flattening, and accepts
+NUL-delimited input for large file lists from tools like `find`, `fd`, and
+`rg --files -0`. Staged operations are stored safely, guarded with `flock`, and
+can be inspected before execution with `fst show`.
 
 ## Installation
 
