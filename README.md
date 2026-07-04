@@ -3,6 +3,15 @@
 `file-stage` provides `fst`, a small command for staging file operations in one
 directory and applying them later in another directory.
 
+## Installation
+
+Install the latest `.deb` package from GitHub Releases:
+
+```sh
+wget https://github.com/KIMGEONUNG/file-stage/releases/download/v0.1.0/file-stage_0.1.0-1_all.deb
+sudo apt install ./file-stage_0.1.0-1_all.deb
+```
+
 ## Examples
 
 Stage copy operations:
